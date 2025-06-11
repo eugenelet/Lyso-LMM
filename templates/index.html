@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Gemma3 Image Processing & Chat</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    .group { margin-bottom: 20px; padding: 10px; border: 1px solid #ccc; }
+    .thumbnail { width: 150px; height: auto; margin: 5px; }
+    .group-title { font-weight: bold; margin-bottom: 5px; }
+    #chatLog { border: 1px solid #ccc; padding: 10px; height: 400px; overflow-y: scroll; margin-bottom: 10px; }
+    .message { margin-bottom: 10px; }
+    .content { white-space: pre-wrap; }
+    ul { list-style-type: none; padding-left: 20px; }
+    li { margin: 4px 0; }
+    .dirLabel { cursor: pointer; color: blue; text-decoration: underline; }
+    .fileLabel { cursor: default; display: none; }
+    .fileThumb { max-width: 50px; max-height: 50px; vertical-align: middle; margin-right: 4px; cursor: pointer; }
+    .fileThumb:hover + .fileLabel { display: inline; }
+    /* Bin icon styling */
+    .binIcon { cursor: pointer; margin-left: 5px; color: red; }
+    /* Modal styling for full-size image preview */
+    #modalOverlay {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.8); display: none; align-items: center; justify-content: center; z-index: 1000;
+    }
+    #modalOverlay img { max-width: 90%; max-height: 90%; }
+    #modalOverlay .closeButton {
+      position: absolute; top: 20px; right: 20px; background: #fff;
+      border: none; font-size: 18px; padding: 5px 10px; cursor: pointer;
+    }
+    .uploadArea { border: 1px dashed #aaa; padding: 10px; margin-bottom: 20px; }
+    #evalImagesArea ul { display: flex; gap: 10px; padding: 0; list-style: none; }
+    #evalImagesArea li { display: flex; flex-direction: column; align-items: center; }
+    #inputArea { margin-bottom: 20px; }
+    #sendButton { padding: 5px 10px; margin-left: 10px; }
+    #sessionArea { border: 1px solid #ccc; padding: 10px; margin-bottom: 20px; text-align: center; }
+    #mainInterface { display: none; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/showdown@2.0.0/dist/showdown.min.js"></script>
+  <script>
+    const converter = new showdown.Converter({ simpleLineBreaks: true });
+    function openFullImage(src) {
+      const modal = document.getElementById("modalOverlay");
+      const modalImg = document.getElementById("modalImg");
+      modalImg.src = src;
+      modal.style.display = "flex";
+    }
+    function closeModal() {
+      document.getElementById("modalOverlay").style.display = "none";
+    }
+    // Delete endpoint (calls main_server /delete)
+    function deleteItem(type, path) {
+      if (!confirm("Are you sure you want to delete " + path + "?")) return;
+      fetch(`/delete?type=${type}&path=${encodeURIComponent(path)}`, { method: "POST" })
+        .then(response => response.json())
+        .then(data => {
+          if (data.status === "success") {
+            alert(type + " deleted: " + path);
+            if (type === "dir" || type === "file") loadDirectoryTree("");
+            else if (type === "eval") loadEvalImages();
+          } else {
+            alert("Deletion failed: " + data.error);
+          }
+        });
+    }
+  </script>
+</head>
+<body>
+  <!-- Session Management Area -->
+  <div id="sessionArea">
+    <div id="sessionStatus">Session not started.</div>
+    <button id="startSessionButton">Start Session</button>
+    <button id="stopSessionButton" style="display:none;">Stop Session</button>
+  </div>
+  
+  <!-- Main Interface (shown only when session is active) -->
+  <div id="mainInterface">
+    <h2>Reference Library</h2>
+    <!-- Directory tree container -->
+    <div id="directoryTree"></div>
+    <!-- Integrated upload for Reference Library -->
+    <div id="uploadLibraryArea" class="uploadArea">
+      <p>Upload files to the Reference Library (target directory):</p>
+      <input type="file" id="uploadLibraryInput" multiple style="display:block; margin-bottom:10px;">
+      <input type="text" id="uploadLibraryTarget" placeholder="Target directory (relative to 'library')" style="width:70%;">
+      <button id="uploadLibraryButton">Upload to Library</button>
+    </div>
+    
+    <h2>Eval Images</h2>
+    <!-- Eval images displayed in a single row with checkboxes and bin icons -->
+    <div id="evalImagesArea"></div>
+    <!-- Integrated upload for Eval Images (temporary) -->
+    <div id="uploadEvalArea" class="uploadArea">
+      <p>Upload Eval Images (temporary):</p>
+      <input type="file" id="uploadEvalInput" multiple style="display:block; margin-bottom:10px;">
+      <button id="uploadEvalButton">Upload to Eval</button>
+    </div>
+    
+    <h2>Chat</h2>
+    <!-- Chat log at the top -->
+    <div id="chatLog"></div>
+    <!-- Unified input area (below the chat log) -->
+    <div id="inputArea">
+      <input type="text" id="chatInput" placeholder="Enter final question (or chat message)..." style="width:70%;">
+      <button id="sendButton">Send</button>
+    </div>
+  </div>
+  
+  <!-- Modal overlay for full-size image preview -->
+  <div id="modalOverlay" onclick="closeModal()">
+    <button class="closeButton" onclick="closeModal(); event.stopPropagation();">Close</button>
+    <img id="modalImg" src="" alt="Full Image">
+  </div>
+  
+  <script>
+    function updateSessionStatus() {
+      fetch('/session_status')
+        .then(response => response.json())
+        .then(data => {
+          document.getElementById("sessionStatus").innerText = "Session status: " + data.session_status;
+          if (data.session_active) {
+            document.getElementById("startSessionButton").style.display = "none";
+            document.getElementById("stopSessionButton").style.display = "inline-block";
+            document.getElementById("mainInterface").style.display = "block";
+            loadDirectoryTree("");
+            loadEvalImages();
+            loadDefaultEvalQuestion();
+          } else {
+            document.getElementById("startSessionButton").style.display = "inline-block";
+            document.getElementById("stopSessionButton").style.display = "none";
+            document.getElementById("mainInterface").style.display = "none";
+            setTimeout(updateSessionStatus, 2000);
+          }
+        });
+    }
+    
+    document.getElementById("startSessionButton").addEventListener("click", () => {
+      const btn = document.getElementById("startSessionButton");
+      btn.disabled = true;
+      btn.innerText = "Loading...";
+      fetch('/start_session_interactive', { method: "POST" })
+        .then(response => response.json())
+        .then(data => { updateSessionStatus(); btn.disabled = false; btn.innerText = "Start Session"; });
+    });
+    
+    document.getElementById("stopSessionButton").addEventListener("click", () => {
+      fetch('/stop_session_interactive', { method: "POST" })
+        .then(response => response.json())
+        .then(data => {
+          updateSessionStatus();
+          document.getElementById("directoryTree").innerHTML = "";
+          document.getElementById("evalImagesArea").innerHTML = "";
+          document.getElementById("chatLog").innerHTML = "";
+          window.conversationStarted = false;
+        });
+    });
+    
+    function loadDirectoryTree(path = "") {
+      fetch('/dir?path=' + encodeURIComponent(path))
+        .then(response => response.json())
+        .then(data => {
+          const treeDiv = document.getElementById("directoryTree");
+          treeDiv.innerHTML = generateTreeHTML(data, path);
+          attachTreeHandlers();
+          attachCheckboxPropagation();
+        });
+    }
+    
+    function generateTreeHTML(data, currentPath) {
+      let html = "<ul>";
+      data.contents.directories.forEach(dir => {
+        let newPath = currentPath === "" ? dir : currentPath + "/" + dir;
+        html += `<li>
+                   <input type="checkbox" class="dirCheckbox" data-path="${newPath}">
+                   <span class="dirLabel" data-path="${newPath}">${dir}</span>
+                   <span class="binIcon" onclick="deleteItem('dir', '${newPath}'); event.stopPropagation();">🗑</span>
+                 </li>`;
+      });
+      data.contents.files.forEach(file => {
+        let filePath = currentPath === "" ? file : currentPath + "/" + file;
+        html += `<li>
+                   <input type="checkbox" class="fileCheckbox" data-path="${filePath}">
+                   <img class="fileThumb" src="/library_image/${filePath}" alt="${file}" onclick="openFullImage(this.src)">
+                   <span class="fileLabel">${file}</span>
+                   <span class="binIcon" onclick="deleteItem('file', '${filePath}'); event.stopPropagation();">🗑</span>
+                 </li>`;
+      });
+      html += "</ul>";
+      return html;
+    }
+    
+    function attachTreeHandlers() {
+      const labels = document.querySelectorAll(".dirLabel");
+      labels.forEach(label => {
+        label.onclick = function() {
+          const path = this.getAttribute("data-path");
+          fetch('/dir?path=' + encodeURIComponent(path))
+            .then(response => response.json())
+            .then(data => {
+              this.parentElement.innerHTML = `<input type="checkbox" class="dirCheckbox" data-path="${path}">
+                <span class="dirLabel" data-path="${path}">${path.split('/').pop()}</span>
+                ${generateTreeHTML(data, path)}`;
+              attachTreeHandlers();
+              attachCheckboxPropagation();
+            });
+        }
+      });
+    }
+    
+    function attachCheckboxPropagation() {
+      const checkboxes = document.querySelectorAll("input[type='checkbox']");
+      checkboxes.forEach(cb => {
+        cb.onchange = function() {
+          let parentLi = this.parentElement;
+          let descendants = parentLi.querySelectorAll("input[type='checkbox']");
+          descendants.forEach(child => { child.checked = this.checked; });
+        }
+      });
+    }
+    
+    function loadDefaultEvalQuestion() {
+      fetch('/eval_question')
+        .then(response => response.json())
+        .then(data => {
+          const chatInput = document.getElementById("chatInput");
+          if (!chatInput.value) { chatInput.value = data.question; }
+        });
+    }
+    
+    function loadEvalImages() {
+      fetch('/eval_images')
+        .then(response => response.json())
+        .then(data => {
+          const evalArea = document.getElementById("evalImagesArea");
+          let html = '<ul style="display: flex; gap: 10px; padding: 0;">';
+          data.forEach(img => {
+            html += `<li style="display: flex; flex-direction: column; align-items: center;">
+                       <img class="fileThumb" src="${img.url}" alt="${img.filename}" onclick="openFullImage(this.src)">
+                       <input type="checkbox" class="evalCheckbox" data-filename="${img.filename}" checked>
+                       <span class="binIcon" onclick="deleteItem('eval', '${img.filename}');">🗑</span>
+                     </li>`;
+          });
+          html += "</ul>";
+          evalArea.innerHTML = html;
+        });
+    }
+    
+    function createMessage(sender, initialText = "") {
+      const chatLog = document.getElementById("chatLog");
+      const messageDiv = document.createElement("div");
+      messageDiv.className = "message";
+      messageDiv.innerHTML = `<strong>${sender}:</strong> <span class="content">${initialText}</span>`;
+      chatLog.appendChild(messageDiv);
+      chatLog.scrollTop = chatLog.scrollHeight;
+      return messageDiv.querySelector(".content");
+    }
+    
+    function streamSSE(url, postData, callbackComplete) {
+      fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(postData)
+      }).then(response => {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let cumulativeText = "";
+        const assistantElem = createMessage("Assistant", "");
+        function readStream() {
+          reader.read().then(({ done, value }) => {
+            if (done) { if (callbackComplete) callbackComplete(cumulativeText); return; }
+            const chunk = decoder.decode(value, { stream: true });
+            const regex = /^data:\s?(.*)$/gm;
+            let match;
+            while ((match = regex.exec(chunk)) !== null) {
+              let token = match[1];
+              token = token.replace(/\\n/g, "\n");
+              cumulativeText += token;
+            }
+            assistantElem.innerHTML = converter.makeHtml(cumulativeText);
+            readStream();
+          });
+        }
+        readStream();
+      }).catch(err => console.error("Error during SSE:", err));
+    }
+    
+    document.getElementById("uploadLibraryButton").addEventListener("click", () => {
+      const targetDir = document.getElementById("uploadLibraryTarget").value;
+      const files = document.getElementById("uploadLibraryInput").files;
+      if (files.length === 0) { alert("Please select at least one file to upload."); return; }
+      const formData = new FormData();
+      formData.append("target", targetDir);
+      for (let i = 0; i < files.length; i++) {
+        formData.append("files", files[i]);
+      }
+      fetch("/upload_library", { method: "POST", body: formData })
+        .then(response => response.json())
+        .then(data => { alert("Uploaded to Library: " + data.files.join(", ")); loadDirectoryTree(""); });
+    });
+    
+    document.getElementById("uploadEvalButton").addEventListener("click", () => {
+      const files = document.getElementById("uploadEvalInput").files;
+      if (files.length === 0) { alert("Please select at least one file to upload."); return; }
+      const formData = new FormData();
+      for (let i = 0; i < files.length; i++) {
+        formData.append("files", files[i]);
+      }
+      fetch("/upload_eval", { method: "POST", body: formData })
+        .then(response => response.json())
+        .then(data => { alert("Uploaded to Eval: " + data.files.join(", ")); loadEvalImages(); });
+    });
+    
+    document.getElementById("sendButton").addEventListener("click", () => {
+      const sendButton = document.getElementById("sendButton");
+      sendButton.disabled = true;
+      const chatInput = document.getElementById("chatInput");
+      const message = chatInput.value;
+      if (!window.conversationStarted) {
+        const checkboxes = document.querySelectorAll("input[type='checkbox']");
+        let selectedPaths = [];
+        checkboxes.forEach(cb => {
+          if (cb.checked) {
+            selectedPaths.push(cb.getAttribute("data-path"));
+          }
+        });
+        if (selectedPaths.length === 0) {
+          alert("Please select at least one directory or file.");
+          sendButton.disabled = false;
+          return;
+        }
+        let selectedEval = [];
+        document.querySelectorAll(".evalCheckbox").forEach(cb => {
+          if (cb.checked) { selectedEval.push(cb.getAttribute("data-filename")); }
+        });
+        const finalQuestion = chatInput.value;
+        streamSSE("/process", { selected_dirs: selectedPaths, selected_eval: selectedEval, final_question: finalQuestion }, () => {
+          sendButton.disabled = false;
+          window.conversationStarted = true;
+          chatInput.value = "";
+        });
+      } else {
+        if (!message) { sendButton.disabled = false; return; }
+        const chatLog = document.getElementById("chatLog");
+        const userMessageElem = document.createElement("div");
+        userMessageElem.className = "message";
+        userMessageElem.innerHTML = `<strong>You:</strong> <span class="content">${message}</span>`;
+        chatLog.appendChild(userMessageElem);
+        chatLog.scrollTop = chatLog.scrollHeight;
+        chatInput.value = "";
+        streamSSE("/chat", { message: message }, () => { sendButton.disabled = false; });
+      }
+    });
+    
+    window.onload = function() {
+      window.conversationStarted = false;
+      updateSessionStatus();
+      attachCheckboxPropagation();
+    };
+  </script>
+  
+</body>
+</html>
